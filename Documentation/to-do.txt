@@ -1,0 +1,33 @@
+You don’t need to “one-shot” both tools in a single LLM turn. The usual pattern is to loop: let the model call tools, feed results back, let it call more tools, and only when it stops calling tools, show the final answer. Right now your code runs at most one tool round, so it stops after get_SAP_account. Fix it by looping until no more tool calls (or you hit a safety limit).
+
+Here’s a drop-in upgrade for process_query that:
+	•	lets the model chain multiple MCP tools automatically,
+	•	supports multiple tool calls per turn,
+	•	guards against infinite loops,
+	•	hides intermediate steps from the user (only returns the final assistant message).
+
+Why this solves your case
+	•	For “reset SAP password”, the model can first call get_SAP_account with the email, receive the username, then immediately call reset_SAP_password with that username, and finally send you a single final message like “Reset complete. A temporary password has been emailed…”.
+	•	You don’t need special logic per tool; the loop handles an arbitrary sequence.
+
+Make the model want to chain both tools
+
+Two extra tweaks greatly improve reliability:
+	1.	Clear tool descriptions on the MCP server:
+	•	get_SAP_account(email:str) -> {"username": str, "status": "found"|"not_found"}
+“Use this to map a user’s email to an SAP username. This is required before resetting a password.”
+	•	reset_SAP_password(username:str) -> {"status":"ok","ticket_id": str}
+“Use this after you know the SAP username. Resets the password and returns a ticket id.”
+	2.	Add a short task policy to your system prompt (already included above), e.g.:
+	•	“If a task requires multiple tools (e.g., find username then reset password), call them in sequence before answering.”
+
+Alternative designs (useful later)
+	•	Composite tool: implement a single MCP tool reset_password(email) that internally does both steps; the agent then only calls one tool.
+	•	Planner pattern: first request “tool plan” (hidden from user), then execute and summarize. Your current loop is simpler and usually good enough.
+
+Small robustness extras
+	•	Increase max_rounds if you have longer chains.
+	•	If a tool result is non-text or large JSON, consider summarizing before feeding back (content tokens matter).
+	•	If the model asks for missing info (e.g., email not present), you’ll see an assistant question with no tool calls — just return that string to the UI so the user can provide it.
+
+This change should get you from “one tool then stop” to “keep calling tools until done,” which is exactly what you want for workflows like get_SAP_account → reset_SAP_password.
