@@ -3,3 +3,14 @@ openai==1.75.0
 python-dotenv
 ipykernel
 httpx
+pip install streamlit
+#start 
+
+
+====FOR integration with SAP======
+pip install python-dotenv
+    https://github.com/SAP-archive/PyRFC
+    Alternative build from source installation:
+        git clone https://github.com/SAP/PyRFC.git
+        cd PyRFC
+            python -m pip install .
