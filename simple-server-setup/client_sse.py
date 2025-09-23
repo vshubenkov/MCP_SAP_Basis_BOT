@@ -124,8 +124,8 @@ class MCPOpenAIClient:
         session_state["summary"] = summary
         # Trim raw history aggressively after summarizing
         session_state["history"] = session_state["history"][-6:]  # keep a small tail
-
-    def _assistant_to_dict(msg) -> dict:
+    
+    def _assistant_to_dict(self, msg) -> dict:
         """
         Convert OpenAI SDK ChatCompletionMessage to a plain dict suitable for the next request.
         """
@@ -305,7 +305,8 @@ async def _debug_run():
     prompts = [
         "What's 2+2? (should NOT need tools)",
         "Please get my SAP username for shubenkov@example.com and reset the password.",
-        "Reset the password for user_id SHUBENKOVV again, please.",
+        "Please get my SAP username for viacheslav.shubenkov@zumtobelgroup.com and reset the password."
+        "Reset the password for user_id again, please.",
     ]
 
     # 3) run them one-by-one with live step logging
