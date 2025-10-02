@@ -20,21 +20,16 @@ mcp = FastMCP(
 def _log(msg: str) -> None:
     print(f"[MCP] {msg}", flush=True)
 
+    
 @mcp.tool()
-def reset_SAP_password(sap_username: str, system_for_pass_reset: str):
+def reset_SAP_password(sap_username: str, system_for_pass_reset: str, unlock_user: bool = False) -> dict:
     """
-    Reset the SAP password for two mandatory given sap_username (username) and system name (SID).
-    Returns True and generated password if the reset was initiated successfully, otherwise False.
+    Reset the SAP password for two mandatory given sap_username (username) and system name (SID) and return structured result.
     """
-    _log(f"reset_SAP_password called with user_id={sap_username!r}")
-    print(sap_username, system_for_pass_reset)
-    r_code, password = reset_password(sap_username, system_for_pass_reset)
-    if r_code:
-        print(r_code)
-        return True, password
-    else:
-        print("Failed to reset password")
-        return False
+    result = reset_password(sap_username, system_for_pass_reset, unlock_user=unlock_user)
+    # Don't print secrets; just return structured content
+    # FastMCP will serialize dicts — your client can read structuredContent.
+    return result
 
 
 @mcp.tool()

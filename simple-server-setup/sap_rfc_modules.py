@@ -1,5 +1,26 @@
 import config
-from pyrfc import Connection, LogonError, CommunicationError
+from typing import TypedDict, List, Optional
+from pyrfc import Connection, LogonError, CommunicationError, ABAPApplicationError, ABAPRuntimeError
+
+class SapMessage(TypedDict, total=False):
+    TYPE: str        # 'S', 'W', 'E', 'A', 'I'
+    ID: str
+    NUMBER: str
+    MESSAGE: str
+    LOG_NO: str
+    LOG_MSG_NO: str
+    MESSAGE_V1: str
+    MESSAGE_V2: str
+    MESSAGE_V3: str
+    MESSAGE_V4: str
+
+class ResetPasswordResult(TypedDict):
+    success: bool
+    password: Optional[str]
+    messages: List[SapMessage]
+    error: Optional[str]     # python-side exception message if any
+    system: str
+    username: str
 
 class SAPUserHandler:
     def __init__(self, host, sysnr, client, user, password):
@@ -102,65 +123,138 @@ class SAPUserHandler:
             #user_session.logger.error(f"An error occurred while searching for user: {e}")
             raise Exception(f"An error occurred while searching for user: {e}")
 
+def reset_password(
+    sap_username: str,
+    system_for_pass_reset: str,
+    *,
+    unlock_user: bool = False,
+) -> ResetPasswordResult:
+    """
+    Reset an SAP user's password by calling BAPI_USER_CHANGE with GENERATE_PWD='X'.
+    Returns a consistent structured result:
+    {
+        "success": bool,
+        "password": str | None,
+        "messages": [ {TYPE, ID, NUMBER, MESSAGE, ...}, ... ],
+        "error": str | None,
+        "system": <SID>,
+        "username": <USER>,
+    }
+    """
+    result: ResetPasswordResult = {
+        "success": False,
+        "password": None,
+        "messages": [],
+        "error": None,
+        "system": system_for_pass_reset,
+        "username": sap_username,
+    }
 
-def reset_password(sap_username, system_for_pass_reset):
-    system_params = config.SAP_SYSTEM_DICT[system_for_pass_reset]
+    # --- Validate system config ---
     try:
-        ##user_session.logger.info(f"Initializing SAPUserHandler for system: {system_for_pass_reset}")
+        system_params = config.SAP_SYSTEM_DICT[system_for_pass_reset]
+    except KeyError:
+        result["error"] = f"Unknown system SID: {system_for_pass_reset}"
+        return result
+
+    required_keys = ("host", "sysnr", "client", "user", "password")
+    missing = [k for k in required_keys if not system_params.get(k)]
+    if missing:
+        result["error"] = f"Missing SAP connection params: {', '.join(missing)}"
+        return result
+
+    sap_handler = None
+    try:
+        # --- Open connection ---
         sap_handler = SAPUserHandler(
-            host=system_params['host'],
-            sysnr=system_params['sysnr'],
-            client=system_params['client'],
-            user=system_params['user'],
-            password=system_params['password']
-        #    #user_session=#user_session
+            host=system_params["host"],
+            sysnr=system_params["sysnr"],
+            client=system_params["client"],
+            user=system_params["user"],
+            password=system_params["password"],
         )
 
-        ##user_session.logger.info(f"Connected to SAP system: {system_for_pass_reset}")
+        # --- Call password change with auto-generation ---
+        resp = sap_handler.conn.call(
+            "BAPI_USER_CHANGE",
+            USERNAME=sap_username,
+            PASSWORDX={"BAPIPWD": "X"},
+            GENERATE_PWD="X",
+        )
 
-        response = sap_handler.conn.call('BAPI_USER_CHANGE',
-                             USERNAME=sap_username,
-                             PASSWORDX={'BAPIPWD': 'X'},
-                             GENERATE_PWD='X')
-        # Check the RETURN structure
-        return_messages = response.get('RETURN', [])
-        for message in return_messages:
-        #    #user_session.logger.info(f"{message['TYPE']} {message['ID']} {message['NUMBER']} {message['MESSAGE']}")
-            if message['TYPE'] == 'E':
-                # If an error occurred, return the error message
-                return f"Error: {message['MESSAGE']}"
+        # Collect messages
+        messages: List[SapMessage] = list(resp.get("RETURN", []) or [])
+        result["messages"] = messages
 
-        generated_password = response.get('GENERATED_PASSWORD')
-        if not generated_password:
-        #    #user_session.logger.error("Password generation failed.")
-            return "Error: Password generation failed."
+        # Any error message?
+        has_error = any(m.get("TYPE") in ("E", "A") for m in messages)
 
-        ##user_session.logger.info(f"Password for user {sap_username} has been successfully reset to new password.")
+        # Extract generated password
+        generated_password = resp.get("GENERATED_PASSWORD")
 
-        # Optionally unlock the user
-        #if sap_unlock_user:
-        #    unlock_response = sap_handler.conn.call('BAPI_USER_UNLOCK', USERNAME=sap_username)
-        #    if unlock_response['RETURN'][0]['TYPE'] not in ['S', 'W']:
-        #        #user_session.logger.error(f"User unlock failed: {unlock_response['RETURN'][0]['MESSAGE']}")
-        #        return False
-        #   #user_session.logger.info(f"User {sap_username} has been successfully unlocked.")
+        # Decide success / rollback vs. commit
+        if has_error or not generated_password:
+            # Roll back on any error or if password was not generated
+            try:
+                sap_handler.conn.call("BAPI_TRANSACTION_ROLLBACK")
+            except Exception:
+                pass  # best effort
 
-        sap_handler.conn.call('BAPI_TRANSACTION_COMMIT')
-        ##user_session.logger.info(f"Changes committed for user {sap_username}.")
+            if has_error:
+                # Summarize SAP-side error
+                err_texts = [m.get("MESSAGE", "") for m in messages if m.get("TYPE") in ("E", "A")]
+                result["error"] = "; ".join(t for t in err_texts if t) or "SAP error during password reset."
+            else:
+                result["error"] = "Password generation failed."
+            return result
 
-        return True, generated_password
+        # Optional unlock (best effort, do not fail the reset if unlock fails)
+        if unlock_user:
+            try:
+                unlock_resp = sap_handler.conn.call("BAPI_USER_UNLOCK", USERNAME=sap_username)
+                unlock_msgs = list(unlock_resp.get("RETURN", []) or [])
+                result["messages"].extend(unlock_msgs)
+                # Not treating unlock failure as hard error — add to messages only
+            except Exception as e:
+                # Record but don't fail the whole operation
+                result["messages"].append({
+                    "TYPE": "W",
+                    "ID": "PY",
+                    "NUMBER": "000",
+                    "MESSAGE": f"Unlock step failed: {e}",
+                })
+
+        # Commit if all good
+        sap_handler.conn.call("BAPI_TRANSACTION_COMMIT")
+
+        # SUCCESS
+        result["success"] = True
+        result["password"] = generated_password
+        return result
+
+    except (CommunicationError, LogonError, ABAPApplicationError, ABAPRuntimeError) as e:
+        # SAP-side exceptions
+        result["error"] = f"SAP error: {e}"
+        try:
+            if sap_handler.conn:
+                sap_handler.conn.call("BAPI_TRANSACTION_ROLLBACK")
+        except Exception:
+            pass
+        return result
 
     except Exception as e:
-        # Log the exception and return failure
-        ##user_session.logger.error(f"An error occurred during password reset for user {sap_username}: {str(e)}")
-        return False
+        # Python-side exceptions
+        result["error"] = f"Runtime error: {e}"
+        try:
+            if sap_handler.conn:
+                sap_handler.conn.call("BAPI_TRANSACTION_ROLLBACK")
+        except Exception:
+            pass
+        return result
 
     finally:
-        # Close the connection in the finally block
         try:
-            if 'sap_handler' in locals() and sap_handler.conn:
+            if sap_handler.conn:
                 sap_handler.conn.close()
-        #        #user_session.logger.info("SAP connection closed.")
-        except Exception as e:
+        except Exception:
             pass
-        #    #user_session.logger.error(f"Error closing SAP connection: {str(e)}")

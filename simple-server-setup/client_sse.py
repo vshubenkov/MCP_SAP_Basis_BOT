@@ -207,8 +207,8 @@ class MCPOpenAIClient:
             if not tool_calls:
                 # Final answer — persist to session history
                 final_text = assistant_message.content or ""
-                # persist the new exchange
-                session_state["history"].extend([user_msg, assistant_message])
+                # ✅ append the plain dict, not the SDK object
+                session_state["history"].extend([user_msg, assistant_dict])
                 # maybe summarize now that we added messages
                 await self._summarize_if_needed(session_state)
                 if on_step:
@@ -303,10 +303,9 @@ async def _debug_run():
 
     # 2) define your test prompts here
     prompts = [
-        "What's 2+2? (should NOT need tools)",
-        "Please get my SAP username for shubenkov@example.com and reset the password.",
-        "Please get my SAP username for viacheslav.shubenkov@zumtobelgroup.com and reset the password."
-        "Reset the password for user_id again, please.",
+        "Please get my SAP username for viacheslav.shubenkov@zumtobelgroup.com and reset the password.",
+        "ok, Z12",
+        "Nice job"
     ]
 
     # 3) run them one-by-one with live step logging
@@ -323,5 +322,5 @@ async def _debug_run():
     # 4) optional: close nicely (useful when stepping in debugger)
     await client.cleanup()
 
-if __name__ == "__main__":
-    asyncio.run(_debug_run())
+# if __name__ == "__main__":
+#     asyncio.run(_debug_run())
